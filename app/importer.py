@@ -36,6 +36,15 @@ ALIASES = {
 TEXT_FIELDS = [f for f in db.FIELDS if f not in ("page_count", "tags", "copies", "cover_file")]
 
 
+def _dupes(row: dict) -> list[dict]:
+    found = db.find_existing(row["title"], row.get("authors", ""), row.get("isbn13", ""), row.get("isbn10", ""))
+    if found and row.get("isbn13"):
+        # A different ISBN means a different edition you also own, so only an ISBN match is a duplicate.
+        i13, i10 = db.normalize_isbns(row.get("isbn13", ""), row.get("isbn10", ""))
+        found = [d for d in found if (i13 and d["isbn13"] == i13) or (i10 and d["isbn10"] == i10)]
+    return found
+
+
 def load_rows(path: Path) -> list[dict]:
     if path.suffix.lower() == ".json":
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -107,11 +116,7 @@ async def import_rows(rows: list[dict], *, enrich: bool, dry_run: bool,
         row.setdefault("location", location) if location else None
         label = f"{row['title']}" + (f" — {row['authors']}" if row.get("authors") else "")
 
-        dupes = db.find_existing(row["title"], row.get("authors", ""), row.get("isbn13", ""), row.get("isbn10", ""))
-        if dupes and row.get("isbn13"):
-            # A different ISBN means a different edition you also own, so only an ISBN match is a duplicate.
-            i13, i10 = db.normalize_isbns(row.get("isbn13", ""), row.get("isbn10", ""))
-            dupes = [d for d in dupes if (i13 and d["isbn13"] == i13) or (i10 and d["isbn10"] == i10)]
+        dupes = _dupes(row)
         if dupes:
             print(f"  = already have: {label}")
             stats["skipped"] += 1
@@ -129,8 +134,7 @@ async def import_rows(rows: list[dict], *, enrich: bool, dry_run: bool,
             else:
                 stats["unmatched"] += 1
             # Filling in an ISBN can reveal a duplicate we couldn't see before.
-            if row.get("isbn13") and db.find_existing(row["title"], row.get("authors", ""),
-                                                      row.get("isbn13", ""), row.get("isbn10", "")):
+            if row.get("isbn13") and _dupes(row):
                 print(f"  = already have: {label}")
                 stats["skipped"] += 1
                 continue

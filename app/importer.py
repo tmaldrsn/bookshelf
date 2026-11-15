@@ -30,7 +30,8 @@ from . import db, lookup
 
 ALIASES = {
     "author": "authors", "isbn": "isbn13", "year": "published_year", "pages": "page_count",
-    "tag": "tags", "genre": "tags", "publisher_name": "publisher", "edition_notes": "edition",
+    "isbn-13": "isbn13", "isbn_13": "isbn13", "book_#": "series_number", "shelf": "location",
+    "edition_details": "edition", "tag": "tags", "genre": "tags", "publisher_name": "publisher", "edition_notes": "edition",
 }
 TEXT_FIELDS = [f for f in db.FIELDS if f not in ("page_count", "tags", "copies", "cover_file")]
 
@@ -107,6 +108,10 @@ async def import_rows(rows: list[dict], *, enrich: bool, dry_run: bool,
         label = f"{row['title']}" + (f" — {row['authors']}" if row.get("authors") else "")
 
         dupes = db.find_existing(row["title"], row.get("authors", ""), row.get("isbn13", ""), row.get("isbn10", ""))
+        if dupes and row.get("isbn13"):
+            # A different ISBN means a different edition you also own, so only an ISBN match is a duplicate.
+            i13, i10 = db.normalize_isbns(row.get("isbn13", ""), row.get("isbn10", ""))
+            dupes = [d for d in dupes if (i13 and d["isbn13"] == i13) or (i10 and d["isbn10"] == i10)]
         if dupes:
             print(f"  = already have: {label}")
             stats["skipped"] += 1

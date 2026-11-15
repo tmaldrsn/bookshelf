@@ -5,7 +5,7 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const view = $('#view');
 
-let CONFIG = { owners: [], formats: [], tags: [], locations: [], count: 0, scan_enabled: true };
+let CONFIG = { owners: [], formats: [], tags: [], locations: [], count: 0 };
 const state = {
   q: '',                                   // last search query
   lib: { owner: '', tag: '', sort: 'recent' },
@@ -83,7 +83,7 @@ function bookItem(b) {
   </a>`;
 }
 
-/** Downscale a phone photo before upload: faster over Tailscale, same quality for the model. */
+/** Downscale a phone photo before upload (used for custom cover photos). */
 async function shrink(file, max = 2576) {
   try {
     const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -100,15 +100,7 @@ async function shrink(file, max = 2576) {
   }
 }
 
-async function scanImage(file, mode) {
-  const fd = new FormData();
-  fd.append('image', await shrink(file), 'photo.jpg');
-  fd.append('mode', mode);
-  return api('/api/scan', { method: 'POST', body: fd });
-}
-
 const ICON_CAMERA = '<svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
-const ICON_PHOTOS = '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/></svg>';
 
 function filePicker(onFile, { capture = true } = {}) {
   const input = document.createElement('input');
@@ -139,7 +131,6 @@ const routes = [
   [/^#\/?$/, renderSearch, 'search'],
   [/^#\/library$/, renderLibrary, 'library'],
   [/^#\/scan$/, renderBarcode, 'scan'],
-  [/^#\/shelf$/, renderScan, 'scan'],
   [/^#\/add$/, renderAdd, 'add'],
   [/^#\/book\/(\d+)\/edit$/, renderEdit, 'library'],
   [/^#\/book\/(\d+)$/, renderBook, 'library'],
@@ -564,7 +555,7 @@ function renderBarcode() {
       <button class="btn" type="submit" style="flex:none">Look up</button>
     </form>
     <div id="scanResult"></div>
-    ${CONFIG.scan_enabled ? '<p class="small muted" style="text-align:center;margin-top:20px"><a href="#/shelf">Scan a whole shelf from a photo</a></p>' : ''}`;
+`;
 
   const result = $('#scanResult');
   const resume = () => { result.innerHTML = ''; $('#camwrap').classList.remove('hidden'); begin(); };
@@ -656,203 +647,6 @@ function showScanResult(result, data, resume) {
       toast(`Added “${saved.title}”`);
       resume();
     } catch (e) { toast(e.message, true); btn.disabled = false; }
-  };
-}
-
-// ---------- Scan a shelf from a photo (needs ANTHROPIC_API_KEY) ----------
-
-async function renderScan() {
-  await loadConfig();
-  if (state.scan) return renderScanResults();
-  view.innerHTML = `
-    <h1>Scan a bookshelf</h1>
-    ${CONFIG.scan_enabled ? '' : `<div class="warnbox" style="margin-bottom:12px">Photo scanning is off: set
-      <code>ANTHROPIC_API_KEY</code> in the server's <code>.env</code> file and restart.</div>`}
-    <div class="dropzone" id="zone">
-      <svg class="hero" viewBox="0 0 24 24"><path d="M4 4h3v16H4zM9 4h3v16H9zM14.5 5.5l2.9-.8 3.6 14.6-2.9.8z"/></svg>
-      <p><strong>Take a photo of your shelf</strong></p>
-      <p class="small muted">One shelf per photo works best. Get close enough that the spine text is readable, with good light and no glare.</p>
-      <div class="stack" style="margin-top:14px">
-        <button class="btn primary block big" id="takePhoto">${ICON_CAMERA} Take photo</button>
-        <button class="btn block" id="pickPhoto">${ICON_PHOTOS} Choose from photos</button>
-      </div>
-    </div>`;
-  $('#takePhoto').onclick = () => filePicker(runScan);
-  $('#pickPhoto').onclick = () => filePicker(runScan, { capture: false });
-}
-
-async function runScan(file) {
-  const url = URL.createObjectURL(file);
-  view.innerHTML = `
-    <h1>Scan a bookshelf</h1>
-    <img class="preview" src="${url}" alt="Your photo">
-    <div class="empty" style="padding-top:4px"><div class="spinner"></div>
-      <p><strong>Reading spines…</strong></p>
-      <p class="small">This usually takes 20–60 seconds, then each book is looked up for ISBN and cover.</p></div>`;
-  try {
-    const { results } = await scanImage(file, 'shelf');
-    state.scan = {
-      photo: url,
-      items: results.map((r) => ({
-        ...r,
-        selected: !r.existing.length && r.detected.confidence !== 'low',
-      })),
-    };
-    renderScanResults();
-  } catch (e) {
-    view.innerHTML = `<h1>Scan a bookshelf</h1><img class="preview" src="${url}" alt="">
-      <div class="warnbox">${esc(e.message)}</div>
-      <div class="actions"><button class="btn primary" id="again">Try another photo</button></div>`;
-    $('#again').onclick = () => { state.scan = null; renderScan(); };
-  }
-}
-
-function resultCard(item, i) {
-  const b = item.book;
-  const d = item.detected;
-  return `<div class="result ${item.selected ? '' : 'off'}" data-i="${i}">
-    <div class="top">
-      <input type="checkbox" class="check" ${item.selected ? 'checked' : ''} aria-label="Add ${esc(b.title)}">
-      ${coverHTML(b)}
-      <div class="meta" style="flex:1;min-width:0">
-        <div class="title" style="font-weight:700">${esc(b.title)}</div>
-        <div class="authors muted small">${esc(b.authors)}</div>
-        <div class="small muted">${esc([b.published_year, b.isbn13 && `ISBN ${b.isbn13}`].filter(Boolean).join(' · '))}</div>
-        <div class="chips">
-          ${b.format ? `<span class="chip">${esc(b.format)}</span>` : ''}
-          ${b.edition ? `<span class="chip edition">${esc(b.edition)}</span>` : ''}
-          ${d.confidence === 'low' ? '<span class="chip warn">unsure</span>' : ''}
-          ${b.tags.map((t) => `<span class="chip">#${esc(t)}</span>`).join('')}
-        </div>
-        ${item.existing.length ? `<div class="warnbox">Already in library: ${item.existing.map((e) =>
-          `<a href="#/book/${e.id}">${esc(e.title)}</a>${e.owner ? ` (${esc(e.owner)})` : ''}`).join(', ')}</div>` : ''}
-        ${!item.source ? '<div class="small muted">No online match: details are from the photo only.</div>' : ''}
-        <button type="button" class="linkbtn" data-act="edit">Edit details</button>
-        &nbsp; <button type="button" class="linkbtn" data-act="others">Wrong book or edition?</button>
-      </div>
-    </div>
-    <div class="edit hidden"></div>
-  </div>`;
-}
-
-function renderScanResults() {
-  const s = state.scan;
-  const lastOwner = store('lastOwner') || '';
-  view.innerHTML = `
-    <div class="topbar"><h1>Found ${s.items.length} book${s.items.length === 1 ? '' : 's'}</h1>
-      <button class="btn" id="newScan" style="flex:none">New scan</button></div>
-    <img class="preview" src="${s.photo}" alt="Your photo">
-    ${s.items.length ? `
-    <div class="card form" style="margin-bottom:12px">
-      <p class="small muted" style="margin-top:0">Applied to every book you add from this photo:</p>
-      <div class="grid2">
-        <div class="field"><label for="b_owner">Owner</label><select id="b_owner">${ownerOptions(lastOwner)}</select></div>
-        <div class="field"><label for="b_loc">Location / shelf</label><input type="text" id="b_loc" list="locs" value="${esc(store('lastLocation') || '')}"></div>
-      </div>
-      <div class="field" style="margin:0"><label for="b_tags">Extra tags</label>
-        <input type="text" id="b_tags" placeholder="e.g. living-room, kids"></div>
-      ${datalist('locs', CONFIG.locations)}
-    </div>
-    <div class="list" id="resultList">${s.items.map(resultCard).join('')}</div>
-    <div class="sticky-actions"><button class="btn primary block big" id="addSel"></button></div>`
-    : `<div class="empty"><p>No books recognised. Try a closer, sharper photo of a single shelf.</p></div>`}`;
-
-  $('#newScan').onclick = () => { state.scan = null; renderScan(); };
-  if (!s.items.length) return;
-
-  const updateCount = () => {
-    const n = s.items.filter((x) => x.selected).length;
-    const btn = $('#addSel');
-    btn.textContent = n ? `Add ${n} book${n === 1 ? '' : 's'}` : 'Select books to add';
-    btn.disabled = !n;
-  };
-  updateCount();
-
-  $('#resultList').addEventListener('change', (e) => {
-    if (!e.target.classList.contains('check')) return;
-    const card = e.target.closest('.result');
-    const item = s.items[+card.dataset.i];
-    item.selected = e.target.checked;
-    card.classList.toggle('off', !item.selected);
-    updateCount();
-  });
-
-  $('#resultList').addEventListener('click', async (e) => {
-    const act = e.target.dataset.act;
-    if (!act) return;
-    const card = e.target.closest('.result');
-    const i = +card.dataset.i;
-    const item = s.items[i];
-    const panel = $('.edit', card);
-    if (act === 'edit') {
-      if (!panel.classList.contains('hidden') && panel.dataset.mode === 'edit') { panel.classList.add('hidden'); return; }
-      panel.dataset.mode = 'edit';
-      panel.classList.remove('hidden');
-      const b = item.book;
-      const inp = (k, label) => `<div class="field"><label>${label}</label><input type="text" data-k="${k}" value="${esc(b[k] ?? '')}"></div>`;
-      panel.innerHTML = `<div class="form">
-        ${inp('title', 'Title')}${inp('authors', 'Author(s)')}
-        <div class="grid2">${inp('isbn13', 'ISBN-13')}${inp('format', 'Format')}</div>
-        ${inp('edition', 'Special edition details')}
-        <div class="field"><label>Tags</label><input type="text" data-k="tags" value="${esc(b.tags.join(', '))}"></div>
-        <button type="button" class="btn block" data-act="done">Done</button></div>`;
-    } else if (act === 'done') {
-      $$('[data-k]', panel).forEach((el) => {
-        item.book[el.dataset.k] = el.dataset.k === 'tags'
-          ? el.value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean) : el.value;
-      });
-      card.outerHTML = resultCard(item, i);
-    } else if (act === 'others') {
-      panel.dataset.mode = 'others';
-      panel.classList.remove('hidden');
-      panel.innerHTML = '<div class="spinner"></div>';
-      const q = `${item.detected.title} ${item.detected.authors.join(' ')}`.trim();
-      try {
-        const found = await api(`/api/lookup?q=${encodeURIComponent(q)}`);
-        panel.innerHTML = `<p class="small muted" style="margin:0 0 6px">Pick the right match (keeps your edition notes and tags):</p>
-          <div class="candidates">${found.map((c, j) => `<button type="button" class="item" data-pick="${j}">
-            ${coverHTML({ cover: c.cover_url, title: c.title })}
-            <div class="meta"><div class="title">${esc(c.title)}</div><div class="authors">${esc(c.authors)}</div>
-            <div class="small muted">${esc([c.publisher, c.published_year, c.isbn13].filter(Boolean).join(' · '))}</div></div>
-          </button>`).join('') || '<p class="small muted">No other matches found. Use “Edit details” instead.</p>'}</div>`;
-        panel.onclick = (ev) => {
-          const pick = ev.target.closest('[data-pick]');
-          if (!pick) return;
-          const c = found[+pick.dataset.pick];
-          const keep = { edition: item.book.edition, format: item.book.format, tags: item.book.tags };
-          item.book = { ...item.book, ...c, ...keep };
-          delete item.book.categories; delete item.book.source;
-          item.source = c.source;
-          card.outerHTML = resultCard(item, i);
-        };
-      } catch (err) { panel.innerHTML = `<p class="small muted">${esc(err.message)}</p>`; }
-    }
-  });
-
-  $('#addSel').onclick = async () => {
-    const owner = $('#b_owner').value;
-    const location = $('#b_loc').value.trim();
-    const extra = $('#b_tags').value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
-    if (owner) store('lastOwner', owner);
-    store('lastLocation', location);
-    const books = s.items.filter((x) => x.selected).map(({ book }) => ({
-      ...book,
-      owner,
-      location,
-      tags: [...new Set([...(book.tags || []), ...extra])],
-    }));
-    const btn = $('#addSel');
-    btn.disabled = true;
-    btn.textContent = 'Saving…';
-    try {
-      const saved = await api('/api/books/bulk', { json: books });
-      toast(`Added ${saved.length} book${saved.length === 1 ? '' : 's'}`);
-      state.scan = null;
-      location.hash = '#/library';
-    } catch (e) {
-      toast(e.message, true);
-      updateCount();
-    }
   };
 }
 

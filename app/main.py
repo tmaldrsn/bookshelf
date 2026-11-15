@@ -12,12 +12,12 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from . import db, lookup, scan  # noqa: E402
+from . import db, lookup  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 OWNERS = [o.strip() for o in os.environ.get("BOOKSHELF_OWNERS", "Me,Spouse,Shared").split(",") if o.strip()]
@@ -78,8 +78,7 @@ async def _read_upload(file: UploadFile) -> bytes:
 def config():
     facets = db.facets()
     facets["owners"] = list(dict.fromkeys([*OWNERS, *facets["owners"]]))
-    return {"formats": FORMATS, "count": db.count_books(), **facets,
-            "scan_enabled": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))}
+    return {"formats": FORMATS, "count": db.count_books(), **facets}
 
 
 @app.get("/api/search")
@@ -171,59 +170,6 @@ async def lookup_books(q: str):
     if not q:
         return []
     return await lookup.lookup_query(q)
-
-
-# ---------- photo scanning ----------
-
-def _suggestion(found: scan.DetectedBook, meta: dict | None) -> dict:
-    """Combine what Claude saw with what the lookup APIs returned into a draft book."""
-    meta = meta or {}
-    tags = list(dict.fromkeys(t.strip().lower() for t in found.suggested_tags if t.strip()))
-    draft = {
-        "title": meta.get("title") or found.title,
-        "subtitle": meta.get("subtitle", ""),
-        "authors": meta.get("authors") or ", ".join(found.authors),
-        "isbn13": meta.get("isbn13", ""),
-        "isbn10": meta.get("isbn10", ""),
-        "publisher": meta.get("publisher", ""),
-        "published_year": meta.get("published_year", ""),
-        "page_count": meta.get("page_count"),
-        "description": meta.get("description", ""),
-        "edition": found.edition_notes,
-        "format": "" if found.format == "Unknown" else found.format,
-        "cover_url": meta.get("cover_url", ""),
-        "tags": tags,
-    }
-    if found.isbn and len(db.clean_isbn(found.isbn)) in (10, 13):
-        draft["isbn13"], draft["isbn10"] = db.normalize_isbns(found.isbn, None)
-    existing = db.find_existing(draft["title"], draft["authors"], draft["isbn13"], draft["isbn10"])
-    if not existing and draft["title"] != found.title:
-        existing = db.find_existing(found.title, ", ".join(found.authors))
-    return {
-        "detected": found.model_dump(),
-        "book": draft,
-        "source": meta.get("source", ""),
-        "existing": [{"id": b["id"], "title": b["title"], "authors": b["authors"], "owner": b["owner"],
-                      "edition": b["edition"], "format": b["format"], "cover": b["cover"]} for b in existing],
-    }
-
-
-@app.post("/api/scan")
-async def scan_photo(image: UploadFile = File(...), mode: str = Form("shelf")):
-    data = await _read_upload(image)
-    try:
-        found = await scan.identify(data, "cover" if mode == "cover" else "shelf")
-    except scan.ScanError as e:
-        raise HTTPException(502, str(e)) from e
-    # Look up all books in parallel, but don't hammer the free APIs.
-    sem = asyncio.Semaphore(6)
-
-    async def one(b: scan.DetectedBook):
-        async with sem:
-            return await lookup.enrich(b.title, b.authors, b.isbn)
-
-    metas = await asyncio.gather(*(one(b) for b in found))
-    return {"results": [_suggestion(b, m) for b, m in zip(found, metas)]}
 
 
 # ---------- export ----------

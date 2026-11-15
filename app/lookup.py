@@ -209,7 +209,7 @@ async def lookup_query(q: str, limit: int = 8) -> list[dict]:
 
 
 async def enrich(title: str, authors: list[str], isbn: str = "") -> dict | None:
-    """Best metadata match for a book Claude spotted in a photo."""
+    """Best metadata match for a book known only by title/author (used by the importer)."""
     if isbn:
         hit = await lookup_isbn(isbn)
         if hit:

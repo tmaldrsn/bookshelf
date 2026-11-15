@@ -200,29 +200,13 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; }
   backdrop-filter: blur(8px); border-radius: 16px;
 }
 
-/* ---------- scan ---------- */
-.dropzone {
-  border: 2px dashed var(--border); border-radius: 18px; padding: 24px 16px; text-align: center;
-  background: var(--surface);
-}
-.dropzone svg.hero { width: 56px; height: 56px; fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.preview { width: 100%; max-height: 260px; object-fit: contain; border-radius: 12px; background: var(--surface-2); margin-bottom: 12px; }
 .spinner {
   width: 36px; height: 36px; border-radius: 50%; margin: 18px auto 8px;
   border: 4px solid var(--surface-2); border-top-color: var(--accent);
   animation: spin 1s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.result { padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
-.result.off { opacity: .55; }
-.result .top { display: flex; gap: 12px; align-items: flex-start; }
-.result .check { width: 26px; height: 26px; flex: none; margin-top: 2px; accent-color: var(--accent); }
-.result .edit { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-.result .linkbtn { background: none; border: 0; padding: 4px 0; color: var(--accent); font-weight: 600; cursor: pointer; font-size: .85rem; }
 .warnbox { margin-top: 6px; padding: 6px 10px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: .82rem; font-weight: 600; }
-.goodbox { margin-top: 6px; padding: 6px 10px; border-radius: 8px; background: var(--good-soft); color: var(--good); font-size: .82rem; font-weight: 600; }
-
 .candidates { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 14px; }
 .candidates button { text-align: left; cursor: pointer; width: 100%; font: inherit; }
 

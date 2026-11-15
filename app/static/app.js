@@ -532,17 +532,21 @@ async function startScanner(video, onCode) {
     if (navigator.vibrate) navigator.vibrate(60);
     onCode(text);
   };
-  const constraints = { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
+  const constraints = { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false };
 
   if ('BarcodeDetector' in window) {
-    const detector = new BarcodeDetector({ formats: ['ean_13'] });
+    // Some devices misbehave when formats are filtered, so ask for what's supported and filter ourselves.
+    let formats = ['ean_13', 'upc_a', 'ean_8'];
+    try { const sup = await BarcodeDetector.getSupportedFormats(); formats = formats.filter((f) => sup.includes(f)); } catch { /* keep default */ }
+    const detector = formats.length ? new BarcodeDetector({ formats }) : new BarcodeDetector();
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
     await video.play();
+    focusContinuously(stream);
     const timer = setInterval(async () => {
       if (done || video.readyState < 2) return;
       try { (await detector.detect(video)).forEach((c) => accept(c.rawValue)); } catch { /* frame not ready */ }
-    }, 150);
+    }, 100);
     stopScanner = () => { clearInterval(timer); stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; };
     return;
   }
@@ -554,6 +558,18 @@ async function startScanner(video, onCode) {
   const reader = new ZXing.BrowserMultiFormatReader(hints, 200);
   stopScanner = () => reader.reset();
   await reader.decodeFromConstraints(constraints, video, (result) => { if (result) accept(result.getText()); });
+  if (video.srcObject) focusContinuously(video.srcObject);
+}
+
+/** Ask the camera for continuous autofocus (barcodes are small, so a soft image never decodes). */
+function focusContinuously(stream) {
+  try {
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const adv = {};
+    if (caps.focusMode?.includes('continuous')) adv.focusMode = 'continuous';
+    if (Object.keys(adv).length) track.applyConstraints({ advanced: [adv] });
+  } catch { /* not supported */ }
 }
 
 async function renderBarcode(_m, params) {

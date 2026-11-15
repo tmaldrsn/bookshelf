@@ -130,6 +130,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .verdict .mark { font-size: 1.6rem; line-height: 1; }
 .verdict.own { background: var(--good-soft); color: var(--good); }
 .verdict.none { background: var(--bad-soft); color: var(--bad); }
+.verdict.maybe { background: var(--warn-soft); color: var(--warn); }
 .verdict .sub { font-weight: 500; font-size: .9rem; color: var(--text); opacity: .8; }
 
 /* ---------- book list ---------- */
@@ -239,3 +240,7 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; }
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, .35); pointer-events: none;
 }
 .camwrap .camhint { position: absolute; left: 0; right: 0; bottom: 8px; margin: 0; text-align: center; color: #fff; font-size: .85rem; font-weight: 600; text-shadow: 0 1px 3px #000; }
+
+details summary { list-style: none; }
+details summary::before { content: '▸ '; }
+details[open] summary::before { content: '▾ '; }

@@ -78,7 +78,7 @@ async def _read_upload(file: UploadFile) -> bytes:
 def config():
     facets = db.facets()
     facets["owners"] = list(dict.fromkeys([*OWNERS, *facets["owners"]]))
-    return {"formats": FORMATS, "count": db.count_books(), **facets}
+    return {"formats": FORMATS, "count": db.count_books(), "missing_isbn": db.count_missing_isbn(), **facets}
 
 
 @app.get("/api/search")
@@ -88,8 +88,8 @@ def search(q: str = "", limit: int = 25):
 
 @app.get("/api/books")
 def list_books(owner: str = "", tag: str = "", location: str = "", sort: str = "recent",
-               limit: int = 500, offset: int = 0):
-    return db.list_books(owner, tag, location, sort, min(limit, 2000), offset)
+               limit: int = 500, offset: int = 0, missing_isbn: bool = False):
+    return db.list_books(owner, tag, location, sort, min(limit, 2000), offset, missing_isbn)
 
 
 @app.post("/api/books", status_code=201)
@@ -160,8 +160,42 @@ async def by_isbn(isbn: str):
     meta = await lookup.lookup_isbn(clean)
     book = meta or {"title": "", "authors": "", "isbn13": i13, "isbn10": i10, "cover_url": "", "source": ""}
     book.setdefault("categories", [])
-    existing = db.find_existing(book["title"], book["authors"], i13, i10)
-    return {"book": book, "found": bool(meta), "existing": existing}
+    return {"book": book, "found": bool(meta), **db.match_for_scan(book["title"], book["authors"], i13, i10)}
+
+
+class ApplyIsbn(BaseModel):
+    isbn: str
+
+
+# Edition-specific fields: a barcode is authoritative for the physical copy, so these are overwritten.
+EDITION_FIELDS = ("isbn13", "isbn10", "publisher", "published_year", "page_count")
+# Everything else is only filled in when blank, so hand-entered details are never clobbered.
+BLANK_FILL_FIELDS = ("subtitle", "authors", "description")
+
+
+@app.post("/api/books/{book_id}/apply-isbn")
+async def apply_isbn(book_id: int, body: ApplyIsbn):
+    """Update an existing record from a scanned barcode."""
+    existing = db.get_book(book_id)
+    if not existing:
+        raise HTTPException(404, "Book not found")
+    clean = db.clean_isbn(body.isbn)
+    if not db.valid_isbn(clean):
+        raise HTTPException(422, "That doesn't look like a valid ISBN")
+    i13, i10 = db.normalize_isbns(clean, None)
+    meta = await lookup.lookup_isbn(clean) or {}
+    changes: dict = {"isbn13": i13, "isbn10": i10}
+    for k in EDITION_FIELDS[2:]:
+        if meta.get(k):
+            changes[k] = meta[k]
+    for k in BLANK_FILL_FIELDS:
+        if meta.get(k) and not existing.get(k):
+            changes[k] = meta[k]
+    # Keep a cover the user uploaded themselves; replace one that came from the web or is missing.
+    has_own_cover = existing.get("cover_file") and not existing.get("cover_url")
+    if meta.get("cover_url") and not has_own_cover:
+        changes["cover_url"] = meta["cover_url"]
+    return db.update_book(book_id, await _with_cover(changes, existing))
 
 
 @app.get("/api/lookup")

@@ -8,7 +8,7 @@ const view = $('#view');
 let CONFIG = { owners: [], formats: [], tags: [], locations: [], count: 0 };
 const state = {
   q: '',                                   // last search query
-  lib: { owner: '', tag: '', sort: 'recent' },
+  lib: { owner: '', tag: '', sort: 'recent', missing: false },
   draft: null,                             // prefilled book for the Add form
   scan: null,                              // last scan results, so going back keeps them
 };
@@ -209,21 +209,27 @@ async function showHome(results) {
     return;
   }
   const recent = await api('/api/books?sort=recent&limit=5');
-  results.innerHTML = `<p class="stats">${CONFIG.count} book${CONFIG.count === 1 ? '' : 's'} in your library</p>
+  const nudge = CONFIG.missing_isbn
+    ? `<a class="verdict maybe" href="#/library?missing=1" style="text-decoration:none"><span class="mark">▮▯▮</span>
+         <div>${CONFIG.missing_isbn} book${CONFIG.missing_isbn === 1 ? '' : 's'} still need a barcode scan
+         <div class="sub">Tap to see them, then scan to fill in ISBN and edition</div></div></a>` : '';
+  results.innerHTML = `${nudge}<p class="stats">${CONFIG.count} book${CONFIG.count === 1 ? '' : 's'} in your library</p>
     <h2>Recently added</h2><div class="list">${recent.map(bookItem).join('')}</div>`;
 }
 
 // ---------- Library ----------
 
-async function renderLibrary() {
+async function renderLibrary(_m, params) {
   await loadConfig();
   const s = state.lib;
+  if (params && params.get('missing')) s.missing = true;
   const ownerList = CONFIG.owners;
   view.innerHTML = `
     <div class="topbar"><h1>Library</h1><span class="stats" id="libcount"></span></div>
     <div class="filters" id="ownerFilters">
       <button data-owner="" class="${s.owner ? '' : 'on'}">Everyone</button>
       ${ownerList.map((o) => `<button data-owner="${esc(o)}" class="${s.owner === o ? 'on' : ''}">${esc(o)}</button>`).join('')}
+      ${CONFIG.missing_isbn || s.missing ? `<button data-missing="1" class="${s.missing ? 'on' : ''}">Needs ISBN (${CONFIG.missing_isbn})</button>` : ''}
     </div>
     <div class="row" style="margin-bottom:14px">
       <select id="tag" aria-label="Tag"><option value="">All tags</option>
@@ -238,7 +244,7 @@ async function renderLibrary() {
     <p class="small muted" style="margin-top:24px;text-align:center"><a href="/api/export.csv">Export CSV</a></p>`;
 
   const load = async () => {
-    const qs = new URLSearchParams({ owner: s.owner, tag: s.tag, sort: s.sort });
+    const qs = new URLSearchParams({ owner: s.owner, tag: s.tag, sort: s.sort, missing_isbn: s.missing });
     const books = await api(`/api/books?${qs}`);
     $('#libcount').textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
     $('#grid').innerHTML = books.length
@@ -250,8 +256,13 @@ async function renderLibrary() {
   $('#ownerFilters').onclick = (e) => {
     const btn = e.target.closest('button');
     if (!btn) return;
-    s.owner = btn.dataset.owner;
-    $$('#ownerFilters button').forEach((b) => b.classList.toggle('on', b === btn));
+    if ('missing' in btn.dataset) {
+      s.missing = !s.missing;
+      btn.classList.toggle('on', s.missing);
+    } else {
+      s.owner = btn.dataset.owner;
+      $$('#ownerFilters button[data-owner]').forEach((b) => b.classList.toggle('on', b === btn));
+    }
     load();
   };
   $('#tag').onchange = (e) => { s.tag = e.target.value; load(); };
@@ -297,7 +308,10 @@ async function renderBook(m) {
     ${b.notes ? `<h2>Notes</h2><div class="card description">${esc(b.notes)}</div>` : ''}
     ${b.description ? `<h2>Description</h2><div class="card description small">${esc(b.description)}</div>` : ''}
     <div class="actions">
-      <a class="btn primary" href="#/book/${b.id}/edit">Edit</a>
+      <a class="btn primary" href="#/scan?book=${b.id}">${ICON_CAMERA} ${b.isbn13 || b.isbn10 ? 'Re-scan barcode' : 'Scan barcode'}</a>
+    </div>
+    <div class="actions">
+      <a class="btn" href="#/book/${b.id}/edit">Edit</a>
       <button class="btn danger" id="del">Delete</button>
     </div>`;
   $('#del').onclick = async () => {
@@ -542,9 +556,19 @@ async function startScanner(video, onCode) {
   await reader.decodeFromConstraints(constraints, video, (result) => { if (result) accept(result.getText()); });
 }
 
-function renderBarcode() {
+async function renderBarcode(_m, params) {
+  // ?book=ID means "this scan is for that specific record".
+  const targetId = params && params.get('book');
+  let target = null;
+  if (targetId) {
+    try { target = await api(`/api/books/${targetId}`); } catch { /* fall back to normal scanning */ }
+  }
   view.innerHTML = `
-    <h1>Scan a barcode</h1>
+    ${target ? `<a class="back" href="#/book/${target.id}">‹ Cancel</a>` : ''}
+    <h1>${target ? 'Update from barcode' : 'Scan a barcode'}</h1>
+    ${target ? `<div class="item" style="margin-bottom:12px">${coverHTML(target)}<div class="meta">
+        <div class="title">${esc(target.title)}</div><div class="authors">${esc(target.authors)}</div>
+        <div class="small muted">Scan the barcode of your copy to fill in its ISBN and edition details.</div></div></div>` : ''}
     <div id="camwrap" class="camwrap">
       <video id="cam" playsinline muted></video>
       <div class="reticle"></div>
@@ -554,8 +578,7 @@ function renderBarcode() {
       <input id="isbnIn" type="text" inputmode="numeric" placeholder="…or type the ISBN" autocomplete="off">
       <button class="btn" type="submit" style="flex:none">Look up</button>
     </form>
-    <div id="scanResult"></div>
-`;
+    <div id="scanResult"></div>`;
 
   const result = $('#scanResult');
   const resume = () => { result.innerHTML = ''; $('#camwrap').classList.remove('hidden'); begin(); };
@@ -571,7 +594,12 @@ function renderBarcode() {
       $('#next').onclick = resume;
       return;
     }
-    showScanResult(result, data, resume);
+    if (target) {
+      // The user said which record this is, so offer exactly that one, whatever the title lookup returned.
+      data.candidates = data.exact.some((b) => b.id === target.id) ? [] : [target];
+      data.other_editions = [];
+    }
+    showScanResult(result, data, resume, target);
   }
 
   async function begin() {
@@ -591,47 +619,77 @@ function renderBarcode() {
   begin();
 }
 
-function showScanResult(result, data, resume) {
+function showScanResult(result, data, resume, target) {
   const b = data.book;
-  const owned = data.existing.length > 0;
-  const card = `<div class="item" style="margin-bottom:12px">${coverHTML({ cover: b.cover_url, title: b.title })}
+  const exact = data.exact;
+  const candidates = data.candidates;
+  const bookCard = `<div class="item" style="margin-bottom:12px">${coverHTML({ cover: b.cover_url, title: b.title })}
       <div class="meta"><div class="title">${esc(b.title || 'Unknown title')}</div>
       <div class="authors">${esc(b.authors)}</div>
       <div class="small muted">${esc([b.publisher, b.published_year, b.isbn13].filter(Boolean).join(' · '))}</div></div></div>`;
 
-  let html = owned
-    ? `<div class="verdict own"><span class="mark">✓</span><div>You own this
-         <div class="sub">${esc(data.existing.map((e) => (e.owner || 'In library') + (e.edition ? ` · ${e.edition}` : '')).join(', '))}</div></div></div>
-       <div class="list" style="margin-bottom:12px">${data.existing.map(bookItem).join('')}</div>`
-    : `<div class="verdict none"><span class="mark">✗</span><div>Not in your library
-         <div class="sub">${data.found ? 'Add it if you buy it' : `No online match for ${esc(b.isbn13)}`}</div></div></div>`;
-  if (!owned && data.found) html += card;
+  let html = '';
+  if (exact.length) {
+    html += `<div class="verdict own"><span class="mark">✓</span><div>${target && exact.some((e) => e.id === target.id) ? 'Already up to date' : 'You own this'}
+        <div class="sub">${esc(exact.map((e) => (e.owner || 'In library') + (e.edition ? ` · ${e.edition}` : '')).join(', '))}</div></div></div>
+      <div class="list" style="margin-bottom:12px">${exact.map(bookItem).join('')}</div>`;
+    if (data.found) html += `<button class="btn block" data-refresh="${exact[0].id}" style="margin-bottom:10px">Refresh its details from this scan</button>`;
+  } else if (candidates.length) {
+    html += `<div class="verdict maybe"><span class="mark">?</span><div>${target ? 'Update this record?' : 'Is this one of yours?'}
+        <div class="sub">${target ? 'This attaches the scanned ISBN and edition details' : 'Matches a book in your library that has no ISBN yet'}</div></div></div>
+      ${data.found ? bookCard : ''}
+      ${candidates.map((c) => `<div class="card" style="margin-bottom:10px">
+          <div class="list">${bookItem(c)}</div>
+          <button class="btn primary block" data-apply="${c.id}" style="margin-top:10px">Yes, update “${esc(c.title.length > 28 ? c.title.slice(0, 26) + '…' : c.title)}”</button>
+        </div>`).join('')}`;
+  } else {
+    html += `<div class="verdict none"><span class="mark">✗</span><div>Not in your library
+        <div class="sub">${data.found ? 'Add it if you buy it' : `No online match for ${esc(b.isbn13)}`}</div></div></div>`;
+    if (data.found) html += bookCard;
+  }
+  if (data.other_editions.length) {
+    html += `<div class="warnbox" style="margin-bottom:10px">You own a different edition:
+      ${data.other_editions.map((o) => `<a href="#/book/${o.id}">${esc(o.title)}</a>${o.edition ? ` (${esc(o.edition)})` : ''}`).join(', ')}</div>`;
+  }
 
-  if (!owned) {
-    if (data.found) {
-      const tag = (b.categories || [])[0];
-      html += `<div class="card form" style="margin-bottom:12px">
-        <div class="grid2">
-          <div class="field"><label for="s_owner">Owner</label><select id="s_owner">${ownerOptions(store('lastOwner') || '')}</select></div>
-          <div class="field"><label for="s_loc">Location</label><input type="text" id="s_loc" list="locs" value="${esc(store('lastLocation') || '')}"></div>
+  // Adding a brand-new record is the fallback, tucked away when a match was offered.
+  if (!exact.length) {
+    const form = data.found
+      ? `<div class="card form" style="margin-bottom:12px">
+          <div class="grid2">
+            <div class="field"><label for="s_owner">Owner</label><select id="s_owner">${ownerOptions(store('lastOwner') || '')}</select></div>
+            <div class="field"><label for="s_loc">Location</label><input type="text" id="s_loc" list="locs" value="${esc(store('lastLocation') || '')}"></div>
+          </div>
+          <div class="field"><label for="s_edition">Special edition details</label>
+            <input type="text" id="s_edition" placeholder="e.g. signed, Folio Society, sprayed edges"></div>
+          <div class="field" style="margin:0"><label for="s_tags">Tags</label>
+            <input type="text" id="s_tags" value="${esc(((b.categories || [])[0] || '').toLowerCase())}" placeholder="fantasy, gift"></div>
+          ${datalist('locs', CONFIG.locations)}
         </div>
-        <div class="field"><label for="s_edition">Special edition details</label>
-          <input type="text" id="s_edition" placeholder="e.g. signed, Folio Society, sprayed edges"></div>
-        <div class="field" style="margin:0"><label for="s_tags">Tags</label>
-          <input type="text" id="s_tags" value="${esc(tag ? tag.toLowerCase() : '')}" placeholder="fantasy, gift"></div>
-        ${datalist('locs', CONFIG.locations)}
-      </div>
-      <button class="btn primary block big" id="addScanned">Add to library</button>`;
-    } else {
-      html += `<button class="btn primary block" id="manual">Enter details by hand</button>`;
-    }
+        <button class="btn ${candidates.length ? '' : 'primary'} block big" id="addScanned">Add as a new book</button>`
+      : `<button class="btn primary block" id="manual">Enter details by hand</button>`;
+    html += candidates.length && !target
+      ? `<details style="margin-top:6px"><summary class="small muted" style="cursor:pointer;padding:6px 0">None of these: it's a different book</summary>${form}</details>`
+      : (candidates.length ? '' : form);
   }
   html += `<button class="btn block" id="next" style="margin-top:10px">Scan next</button>`;
   result.innerHTML = html;
   $('#next').onclick = resume;
 
-  if ($('#manual')) $('#manual').onclick = () => { state.draft = { isbn13: b.isbn13, isbn10: b.isbn10 }; location.hash = '#/add'; };
-  if ($('#addScanned')) $('#addScanned').onclick = async () => {
+  const applyTo = async (id, btn) => {
+    btn.disabled = true;
+    try {
+      const updated = await api(`/api/books/${id}/apply-isbn`, { json: { isbn: b.isbn13 } });
+      toast(`Updated “${updated.title}”`);
+      if (target) location.hash = `#/book/${updated.id}`;   // came from a record: go back to it
+      else resume();                                         // batch mode: keep scanning
+    } catch (e) { toast(e.message, true); btn.disabled = false; }
+  };
+  $$('[data-apply]', result).forEach((btn) => { btn.onclick = () => applyTo(btn.dataset.apply, btn); });
+  $$('[data-refresh]', result).forEach((btn) => { btn.onclick = () => applyTo(btn.dataset.refresh, btn); });
+
+  if ($('#manual', result)) $('#manual').onclick = () => { state.draft = { isbn13: b.isbn13, isbn10: b.isbn10 }; location.hash = '#/add'; };
+  if ($('#addScanned', result)) $('#addScanned').onclick = async () => {
     const btn = $('#addScanned');
     btn.disabled = true;
     const owner = $('#s_owner').value;

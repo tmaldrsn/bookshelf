@@ -227,8 +227,10 @@ SORTS = {
 
 
 def list_books(owner: str = "", tag: str = "", location: str = "", sort: str = "recent",
-               limit: int = 500, offset: int = 0) -> list[dict]:
+               limit: int = 500, offset: int = 0, missing_isbn: bool = False) -> list[dict]:
     where, args = [], []
+    if missing_isbn:
+        where.append("isbn13 = '' AND isbn10 = ''")
     if owner:
         where.append("owner = ?")
         args.append(owner)
@@ -249,6 +251,11 @@ def list_books(owner: str = "", tag: str = "", location: str = "", sort: str = "
 def count_books() -> int:
     with connect() as conn:
         return conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+
+
+def count_missing_isbn() -> int:
+    with connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM books WHERE isbn13 = '' AND isbn10 = ''").fetchone()[0]
 
 
 def search(q: str, limit: int = 25) -> list[dict]:
@@ -305,6 +312,16 @@ def _fuzzy(conn: sqlite3.Connection, q: str, limit: int) -> list[sqlite3.Row]:
     return [r for _, r in scored[:limit]]
 
 
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", (text or "").lower())
+
+
+def _main_title(title: str) -> str:
+    """Title without a subtitle or edition suffix: 'Dune: Deluxe Edition' -> 'Dune'."""
+    main = re.split(r"\s*[:(\[–—]|\s+-\s+", title or "", maxsplit=1)[0]
+    return main if _words(main) else (title or "")
+
+
 def find_existing(title: str, authors: str = "", isbn13: str = "", isbn10: str = "") -> list[dict]:
     """Books already in the library that look like this one (for duplicate warnings)."""
     i13, i10 = normalize_isbns(isbn13, isbn10)
@@ -316,7 +333,8 @@ def find_existing(title: str, authors: str = "", isbn13: str = "", isbn10: str =
             ).fetchall()
             if rows:
                 return [row_to_dict(r) for r in rows]
-        title_tokens = re.findall(r"\w+", (title or "").lower())
+        # Match on the main title, so "Dune: Deluxe Edition" still finds "Dune".
+        title_tokens = _words(_main_title(title))
         if not title_tokens:
             return []
         match = "title : (" + " ".join(f'"{t}"' for t in title_tokens) + ")"
@@ -325,17 +343,39 @@ def find_existing(title: str, authors: str = "", isbn13: str = "", isbn10: str =
             (match,),
         ).fetchall()
     # Require the title to match closely, and the author's surname if we know it.
-    wanted = " ".join(title_tokens)
+    wanted_full = " ".join(_words(title))
+    wanted_main = " ".join(title_tokens)
     surname = (re.findall(r"\w+", authors.lower()) or [""])[-1] if authors else ""
     out = []
     for r in rows:
-        have = " ".join(re.findall(r"\w+", r["title"].lower()))
-        if difflib.SequenceMatcher(None, wanted, have).ratio() < 0.8:
+        have_full = " ".join(_words(r["title"]))
+        have_main = " ".join(_words(_main_title(r["title"])))
+        same_main = wanted_main == have_main
+        if not same_main and difflib.SequenceMatcher(None, wanted_full, have_full).ratio() < 0.8:
             continue
         if surname and r["authors"] and surname not in r["authors"].lower():
             continue
         out.append(row_to_dict(r))
     return out
+
+
+def match_for_scan(title: str, authors: str, isbn13: str, isbn10: str) -> dict:
+    """Sort what's in the library into: same ISBN, imported copies lacking an ISBN, and other editions."""
+    i13, i10 = normalize_isbns(isbn13, isbn10)
+    exact = []
+    if i13 or i10:
+        with connect() as conn:
+            exact = [row_to_dict(r) for r in conn.execute(
+                "SELECT * FROM books WHERE (isbn13 != '' AND isbn13 = ?) OR (isbn10 != '' AND isbn10 = ?)",
+                (i13, i10))]
+    seen = {b["id"] for b in exact}
+    candidates, others = [], []
+    if title:
+        for b in find_existing(title, authors):
+            if b["id"] in seen:
+                continue
+            (candidates if not b["isbn13"] and not b["isbn10"] else others).append(b)
+    return {"exact": exact, "candidates": candidates, "other_editions": others}
 
 
 def facets() -> dict:

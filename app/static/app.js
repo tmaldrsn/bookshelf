@@ -551,14 +551,67 @@ async function startScanner(video, onCode) {
     return;
   }
 
-  // Fallback (iPhone Safari etc.): bundled ZXing decoder.
+  // Fallback (iPhone, any browser): bundled ZXing decoder, fed by our own frame loop.
   await loadScript('/static/vendor/zxing.min.js');
-  const hints = new Map([[ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]],
+  const reader = zxingReader();
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+  await video.play();
+  focusContinuously(stream);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  let n = 0;
+  const timer = setInterval(() => {
+    if (done || video.readyState < 2 || !video.videoWidth) return;
+    // Alternate between the middle band (where you aim) and the whole frame.
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const full = n++ % 3 === 2;
+    const sw = full ? vw : Math.round(vw * 0.9), sh = full ? vh : Math.round(vh * 0.4);
+    const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+    const scale = Math.min(1, 1280 / sw);
+    canvas.width = Math.round(sw * scale); canvas.height = Math.round(sh * scale);
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    const text = decodeCanvas(canvas, reader);
+    if (text) accept(text);
+  }, 120);
+  stopScanner = () => { clearInterval(timer); stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; };
+}
+
+function zxingReader() {
+  const hints = new Map([[ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.UPC_A]],
                          [ZXing.DecodeHintType.TRY_HARDER, true]]);
-  const reader = new ZXing.BrowserMultiFormatReader(hints, 200);
-  stopScanner = () => reader.reset();
-  await reader.decodeFromConstraints(constraints, video, (result) => { if (result) accept(result.getText()); });
-  if (video.srcObject) focusContinuously(video.srcObject);
+  const reader = new ZXing.MultiFormatReader();
+  reader.setHints(hints);
+  return reader;
+}
+
+/** Decode a canvas with ZXing, trying two binarizers. Returns the text or ''. */
+function decodeCanvas(canvas, reader) {
+  const source = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+  for (const Binarizer of [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer]) {
+    try { return reader.decode(new ZXing.BinaryBitmap(new Binarizer(source))).getText(); } catch { /* not found, try next */ }
+  }
+  return '';
+}
+
+/** Decode a still photo (taken with the phone's own camera app, which focuses far better than a video feed). */
+async function decodePhoto(file) {
+  await loadScript('/static/vendor/zxing.min.js');
+  const reader = zxingReader();
+  const bmp = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  for (const maxSide of [1600, 1000, 2400, 700]) {
+    const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    for (const crop of [1, 0.6]) { // whole photo, then the middle
+      const sw = bmp.width * crop, sh = bmp.height * crop;
+      canvas.width = Math.round(sw * scale); canvas.height = Math.round(sh * scale);
+      ctx.drawImage(bmp, (bmp.width - sw) / 2, (bmp.height - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+      const text = decodeCanvas(canvas, reader);
+      if (ISBN_BARCODE.test(text)) return text;
+    }
+  }
+  return '';
 }
 
 /** Ask the camera for continuous autofocus (barcodes are small, so a soft image never decodes). */
@@ -590,6 +643,8 @@ async function renderBarcode(_m, params) {
       <div class="reticle"></div>
       <p class="camhint">Point at the barcode on the back cover</p>
     </div>
+    <div class="actions" style="margin:12px 0 0"><button class="btn" id="photoBtn" type="button">📷 Take a photo of the barcode</button>
+      <input id="photoIn" type="file" accept="image/*" capture="environment" hidden></div>
     <form class="row" id="isbnForm" style="margin:12px 0">
       <input id="isbnIn" type="text" inputmode="numeric" placeholder="…or type the ISBN" autocomplete="off">
       <button class="btn" type="submit" style="flex:none">Look up</button>
@@ -631,6 +686,21 @@ async function renderBarcode(_m, params) {
     e.preventDefault();
     const v = $('#isbnIn').value.trim();
     if (v) { $('#isbnIn').value = ''; $('#isbnIn').blur(); handle(v); }
+  };
+  $('#photoBtn').onclick = () => $('#photoIn').click();
+  $('#photoIn').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    stopCamera();
+    $('#camwrap').classList.add('hidden');
+    result.innerHTML = '<div class="empty"><div class="spinner"></div><p>Reading the barcode…</p></div>';
+    let isbn = '';
+    try { isbn = await decodePhoto(file); } catch { /* fall through to the message */ }
+    if (isbn) return handle(isbn);
+    result.innerHTML = `<div class="warnbox">Couldn't read a barcode in that photo. Get closer, keep the barcode flat and sharp, or type the ISBN.</div>
+      <div class="actions"><button class="btn primary" id="next">Try again</button></div>`;
+    $('#next').onclick = resume;
   };
   begin();
 }

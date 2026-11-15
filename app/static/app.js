@@ -311,9 +311,24 @@ async function renderBook(m) {
       <a class="btn primary" href="#/scan?book=${b.id}">${ICON_CAMERA} ${b.isbn13 || b.isbn10 ? 'Re-scan barcode' : 'Scan barcode'}</a>
     </div>
     <div class="actions">
+      <button class="btn" id="takePhoto">${ICON_CAMERA} Take photo</button>
+      <button class="btn" id="uploadPhoto">Upload photo</button>
+    </div>
+    <div class="actions">
       <a class="btn" href="#/book/${b.id}/edit">Edit</a>
       <button class="btn danger" id="del">Delete</button>
     </div>`;
+  const sendPhoto = async (file) => {
+    const fd = new FormData();
+    fd.append('image', await shrink(file, 1600), 'cover.jpg');
+    try {
+      await api(`/api/books/${b.id}/cover`, { method: 'POST', body: fd });
+      toast('Photo saved');
+      renderBook(m);
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#takePhoto').onclick = () => filePicker(sendPhoto);
+  $('#uploadPhoto').onclick = () => filePicker(sendPhoto, { capture: false });
   $('#del').onclick = async () => {
     if (!confirm(`Delete “${b.title}” from your library?`)) return;
     try {

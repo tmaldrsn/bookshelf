@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 import os
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,7 +16,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, field_validator  # noqa: E402
 
 from . import db, lookup  # noqa: E402
 
@@ -48,6 +49,18 @@ class BookIn(BaseModel):
     notes: str | None = None
     cover_url: str | None = None
     copies: int | None = None
+    read_at: str | None = None   # YYYY-MM-DD, or "" for unread
+
+    @field_validator("read_at")
+    @classmethod
+    def _check_read_at(cls, v: str | None) -> str | None:
+        v = (v or "").strip() if v is not None else None
+        if v:
+            try:
+                date.fromisoformat(v)
+            except ValueError as e:
+                raise ValueError("read_at must be a date like 2026-11-15") from e
+        return v
 
 
 async def _with_cover(data: dict, existing: dict | None = None) -> dict:
@@ -88,8 +101,8 @@ def search(q: str = "", limit: int = 25):
 
 @app.get("/api/books")
 def list_books(owner: str = "", tag: str = "", location: str = "", sort: str = "recent",
-               limit: int = 500, offset: int = 0, missing_isbn: bool = False):
-    return db.list_books(owner, tag, location, sort, min(limit, 2000), offset, missing_isbn)
+               limit: int = 500, offset: int = 0, missing_isbn: bool = False, read: str = ""):
+    return db.list_books(owner, tag, location, sort, min(limit, 2000), offset, missing_isbn, read)
 
 
 @app.post("/api/books", status_code=201)

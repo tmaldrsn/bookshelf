@@ -17,7 +17,7 @@ DB_PATH = DATA_DIR / "bookshelf.db"
 FIELDS = [
     "title", "subtitle", "authors", "isbn13", "isbn10", "publisher", "published_year",
     "series", "series_number", "edition", "format", "page_count", "description",
-    "owner", "location", "tags", "notes", "cover_url", "cover_file", "copies",
+    "owner", "location", "tags", "notes", "cover_url", "cover_file", "copies", "read_at",
 ]
 
 SCHEMA = """
@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS books (
     cover_url      TEXT NOT NULL DEFAULT '',   -- where the cover came from
     cover_file     TEXT NOT NULL DEFAULT '',   -- cached file in data/covers
     copies         INTEGER NOT NULL DEFAULT 1,
-    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    read_at        TEXT NOT NULL DEFAULT '',   -- YYYY-MM-DD finished reading; '' = unread
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_books_isbn13 ON books(isbn13);
@@ -64,6 +65,10 @@ def init() -> None:
     COVERS_DIR.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Lightweight migration for databases created before a column existed.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(books)")}
+        if "read_at" not in cols:
+            conn.execute("ALTER TABLE books ADD COLUMN read_at TEXT NOT NULL DEFAULT ''")
 
 
 @contextmanager
@@ -223,12 +228,18 @@ SORTS = {
     "recent": "created_at DESC, id DESC",
     "title": "title COLLATE NOCASE",
     "author": "authors COLLATE NOCASE, title COLLATE NOCASE",
+    "read": "read_at DESC, title COLLATE NOCASE",
 }
 
 
 def list_books(owner: str = "", tag: str = "", location: str = "", sort: str = "recent",
-               limit: int = 500, offset: int = 0, missing_isbn: bool = False) -> list[dict]:
+               limit: int = 500, offset: int = 0, missing_isbn: bool = False,
+               read: str = "") -> list[dict]:
     where, args = [], []
+    if read == "read":
+        where.append("read_at != ''")
+    elif read == "unread":
+        where.append("read_at = ''")
     if missing_isbn:
         where.append("isbn13 = '' AND isbn10 = ''")
     if owner:

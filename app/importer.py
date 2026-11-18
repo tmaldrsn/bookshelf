@@ -9,6 +9,9 @@ series, series_number, edition, format, page_count, description, owner, location
 
 Rows already in the library (same ISBN, or the same title and author) are skipped.
 
+CSV may also have a "confidence" column (high/medium/low: how sure the spine was read); it becomes a
+read:<level> tag. With --enrich, each book also gets a match:<level> tag for the online match.
+
 --enrich looks each book up online to fill in blanks:
   * with an ISBN: everything (edition-accurate);
   * title only: just description and cover. ISBN, publisher and year are NOT guessed, because a
@@ -73,7 +76,11 @@ def normalize_row(raw: dict) -> dict:
             except (TypeError, ValueError):
                 continue
         row[k] = value
-    return {k: v for k, v in row.items() if k in db.FIELDS}
+    out = {k: v for k, v in row.items() if k in db.FIELDS}
+    conf = str(raw.get("confidence", "") or raw.get("read_confidence", "")).strip().lower()
+    if conf in ("high", "medium", "low"):
+        out["tags"] = [*out.get("tags", []), f"read:{conf}"]
+    return out
 
 
 def _surname(authors: str) -> str:
@@ -81,29 +88,46 @@ def _surname(authors: str) -> str:
     return words[-1] if words else ""
 
 
-async def _enrich(row: dict) -> tuple[dict, str]:
-    """Return (fields to fill in, note) for a row."""
+FULL_KEYS = ("title", "subtitle", "authors", "isbn13", "isbn10", "publisher",
+             "published_year", "page_count", "description", "cover_url")
+
+
+def _words(t: str) -> set[str]:
+    return set(re.findall(r"\w+", t.lower()))
+
+
+async def _enrich(row: dict, full: bool = False) -> tuple[dict, str, str]:
+    """Return (fields to fill in, note, match confidence: high/medium/none)."""
     isbn = row.get("isbn13") or row.get("isbn10") or ""
     if isbn and db.valid_isbn(db.clean_isbn(isbn)):
         meta = await lookup.lookup_isbn(isbn)
         if not meta:
-            return {}, "ISBN not found online"
-        fill = {k: meta.get(k) for k in ("title", "subtitle", "authors", "isbn13", "isbn10", "publisher",
-                                         "published_year", "page_count", "description", "cover_url")}
-        return fill, f"matched by ISBN ({meta['source']})"
+            return {}, "ISBN not found online", "none"
+        return {k: meta.get(k) for k in FULL_KEYS}, f"matched by ISBN ({meta['source']})", "high"
 
     authors = row.get("authors", "")
     meta = await lookup.enrich(row["title"], [a.strip() for a in authors.split(",") if a.strip()][:1])
     if not meta or not lookup._title_close(meta["title"], row["title"]):
-        return {}, "no online match"
-    if authors and _surname(authors) and _surname(authors) not in meta.get("authors", "").lower():
-        return {}, "no online match (author differs)"
-    fill = {k: meta.get(k) for k in ("description", "cover_url")}
-    return fill, f"description/cover from title match ({meta['source']})"
+        return {}, "no online match", "none"
+    author_ok = None
+    if authors and _surname(authors):
+        author_ok = _surname(authors) in meta.get("authors", "").lower()
+        if not author_ok:
+            return {}, "no online match (author differs)", "none"
+    a, b = _words(meta["title"]), _words(row["title"])
+    conf = "high" if author_ok and len(a & b) / len(a | b) >= 0.8 else "medium"
+    keys = FULL_KEYS if full else ("description", "cover_url")
+    fill = {k: meta.get(k) for k in keys}
+    if full:
+        # Keep the title/authors as read from the spine; they're what the user sees on the shelf.
+        fill.pop("title", None)
+        if authors:
+            fill.pop("authors", None)
+    return fill, f"{'full details' if full else 'description/cover'} from title match ({meta['source']}), {conf}", conf
 
 
 async def import_rows(rows: list[dict], *, enrich: bool, dry_run: bool,
-                      owner: str = "", location: str = "") -> dict:
+                      owner: str = "", location: str = "", full: bool = False) -> dict:
     stats = {"added": 0, "skipped": 0, "enriched": 0, "unmatched": 0}
     sem = asyncio.Semaphore(4)
 
@@ -125,7 +149,9 @@ async def import_rows(rows: list[dict], *, enrich: bool, dry_run: bool,
         note = ""
         if enrich:
             async with sem:
-                fill, note = await _enrich(row)
+                fill, note, conf = await _enrich(row, full)
+            if full or conf != "none":
+                row["tags"] = [*row.get("tags", []), f"match:{conf}"]
             for k, v in fill.items():
                 if v and not row.get(k):
                     row[k] = v
@@ -155,6 +181,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Import books from a JSON or CSV file")
     ap.add_argument("file", type=Path)
     ap.add_argument("--enrich", action="store_true", help="look up missing details online")
+    ap.add_argument("--full", action="store_true",
+                    help="with --enrich: fill ISBN, publisher, year, pages etc. from the best title match "
+                         "(may be a different edition than yours); tags each book match:high/medium/none")
     ap.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     ap.add_argument("--owner", default="", help="default owner for rows without one")
     ap.add_argument("--location", default="", help="default location for rows without one")
@@ -164,8 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     db.init()
     rows = load_rows(args.file)
     print(f"Read {len(rows)} rows from {args.file}" + (" (dry run)" if args.dry_run else ""))
-    stats = asyncio.run(import_rows(rows, enrich=args.enrich, dry_run=args.dry_run,
-                                    owner=args.owner, location=args.location))
+    stats = asyncio.run(import_rows(rows, enrich=args.enrich or args.full, dry_run=args.dry_run,
+                                    owner=args.owner, location=args.location, full=args.full))
     print(f"\nAdded {stats['added']}, skipped {stats['skipped']} duplicates"
           + (f", enriched {stats['enriched']}, no online match for {stats['unmatched']}" if args.enrich else ""))
     return 0

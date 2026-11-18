@@ -86,3 +86,13 @@ Copy the `data/` folder.
 - `app/importer.py`: bulk import CLI
 - `app/static/`: the phone UI (vanilla JS, no build step, installable PWA); `vendor/zxing.min.js` is the barcode fallback for browsers without a built-in detector (iPhone Safari)
 - `scripts/`: Windows autostart and Tailscale helpers
+
+## Backups
+
+```bash
+uv run python -m app.backup                      # zip of the database + covers + imports, keeps newest 14
+powershell -ExecutionPolicy Bypass -File scripts\install-backup.ps1   # run it daily at 02:00 (add -Time 21:30 to change)
+uv run python -m app.backup --restore <file.zip> # restore (stop the app first)
+```
+
+Backups go to `data/backups/` unless `BOOKSHELF_BACKUP_DIR` is set in `.env`; point it at another drive or a cloud-synced folder so a disk failure doesn't take the backups with it.

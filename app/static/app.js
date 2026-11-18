@@ -8,7 +8,7 @@ const view = $('#view');
 let CONFIG = { owners: [], formats: [], tags: [], locations: [], count: 0 };
 const state = {
   q: '',                                   // last search query
-  lib: { owner: '', tag: '', sort: 'recent', missing: false },
+  lib: { owner: '', tag: '', sort: 'recent', missing: false, read: '' },
   draft: null,                             // prefilled book for the Add form
   scan: null,                              // last scan results, so going back keeps them
 };
@@ -52,6 +52,12 @@ function toast(msg, error = false) {
   toastTimer = setTimeout(() => { t.className = 'toast'; }, error ? 5000 : 2600);
 }
 
+/** Today's date in the user's local timezone, as YYYY-MM-DD. */
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function debounce(fn, ms) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
@@ -65,6 +71,7 @@ function coverHTML(b, cls = 'cover') {
 
 function chips(b) {
   const out = [];
+  if (b.read_at) out.push(`<span class="chip good">✓ Read ${esc(b.read_at)}</span>`);
   if (b.owner) out.push(`<span class="chip owner">${esc(b.owner)}</span>`);
   if (b.format) out.push(`<span class="chip">${esc(b.format)}</span>`);
   if (b.edition) out.push(`<span class="chip edition">${esc(b.edition.length > 40 ? b.edition.slice(0, 38) + '…' : b.edition)}</span>`);
@@ -230,6 +237,8 @@ async function renderLibrary(_m, params) {
       <button data-owner="" class="${s.owner ? '' : 'on'}">Everyone</button>
       ${ownerList.map((o) => `<button data-owner="${esc(o)}" class="${s.owner === o ? 'on' : ''}">${esc(o)}</button>`).join('')}
       ${CONFIG.missing_isbn || s.missing ? `<button data-missing="1" class="${s.missing ? 'on' : ''}">Needs ISBN (${CONFIG.missing_isbn})</button>` : ''}
+      <button data-read="read" class="${s.read === 'read' ? 'on' : ''}">Read</button>
+      <button data-read="unread" class="${s.read === 'unread' ? 'on' : ''}">Unread</button>
     </div>
     <div class="row" style="margin-bottom:14px">
       <select id="tag" aria-label="Tag"><option value="">All tags</option>
@@ -238,17 +247,18 @@ async function renderLibrary(_m, params) {
         <option value="recent" ${s.sort === 'recent' ? 'selected' : ''}>Recently added</option>
         <option value="title" ${s.sort === 'title' ? 'selected' : ''}>Title A–Z</option>
         <option value="author" ${s.sort === 'author' ? 'selected' : ''}>Author A–Z</option>
+        <option value="read" ${s.sort === 'read' ? 'selected' : ''}>Recently read</option>
       </select>
     </div>
     <div id="grid"></div>
     <p class="small muted" style="margin-top:24px;text-align:center"><a href="/api/export.csv">Export CSV</a></p>`;
 
   const load = async () => {
-    const qs = new URLSearchParams({ owner: s.owner, tag: s.tag, sort: s.sort, missing_isbn: s.missing });
+    const qs = new URLSearchParams({ owner: s.owner, tag: s.tag, sort: s.sort, missing_isbn: s.missing, read: s.read });
     const books = await api(`/api/books?${qs}`);
     $('#libcount').textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
     $('#grid').innerHTML = books.length
-      ? `<div class="grid">${books.map((b) => `<a href="#/book/${b.id}">${coverHTML(b)}
+      ? `<div class="grid">${books.map((b) => `<a href="#/book/${b.id}"><div class="coverwrap">${coverHTML(b)}${b.read_at ? '<span class="readmark" title="Read">✓</span>' : ''}</div>
            <div class="gt">${esc(b.title)}</div><div class="ga">${esc(b.authors)}</div></a>`).join('')}</div>`
       : `<div class="empty"><div class="big">📭</div><p>No books here yet.</p>
            <p><a class="btn primary" href="#/scan">Scan a barcode</a></p></div>`;
@@ -259,6 +269,9 @@ async function renderLibrary(_m, params) {
     if ('missing' in btn.dataset) {
       s.missing = !s.missing;
       btn.classList.toggle('on', s.missing);
+    } else if ('read' in btn.dataset) {
+      s.read = s.read === btn.dataset.read ? '' : btn.dataset.read;
+      $$('#ownerFilters button[data-read]').forEach((b) => b.classList.toggle('on', b.dataset.read === s.read));
     } else {
       s.owner = btn.dataset.owner;
       $$('#ownerFilters button[data-owner]').forEach((b) => b.classList.toggle('on', b === btn));
@@ -295,7 +308,6 @@ async function renderBook(m) {
       ${fact('Edition', b.edition)}
       ${fact('Series', [b.series, b.series_number && `#${b.series_number}`].filter(Boolean).join(' '))}
       ${fact('Owner', b.owner)}
-      ${fact('Location', b.location)}
       ${fact('Format', b.format)}
       ${fact('Publisher', b.publisher)}
       ${fact('Published', b.published_year)}
@@ -305,6 +317,14 @@ async function renderBook(m) {
       ${fact('Copies', b.copies > 1 ? b.copies : '')}
       ${fact('Added', (b.created_at || '').slice(0, 10))}
     </dl></div>
+    <div class="card readcard">
+      <div class="readrow">
+        <div><strong>${b.read_at ? '✓ Read' : 'Not read yet'}</strong></div>
+        <button class="btn ${b.read_at ? '' : 'primary'}" id="toggleRead" style="flex:none">${b.read_at ? 'Mark unread' : 'Mark as read'}</button>
+      </div>
+      ${b.read_at ? `<div class="field" style="margin:10px 0 0"><label for="readAt">Finished on</label>
+        <input type="date" id="readAt" value="${esc(b.read_at)}" max="${todayISO()}"></div>` : ''}
+    </div>
     ${b.notes ? `<h2>Notes</h2><div class="card description">${esc(b.notes)}</div>` : ''}
     ${b.description ? `<h2>Description</h2><div class="card description small">${esc(b.description)}</div>` : ''}
     <div class="actions">
@@ -327,6 +347,15 @@ async function renderBook(m) {
       renderBook(m);
     } catch (e) { toast(e.message, true); }
   };
+  const setRead = async (read_at) => {
+    try {
+      await api(`/api/books/${b.id}`, { method: 'PUT', json: { read_at } });
+      toast(read_at ? 'Marked as read' : 'Marked unread');
+      renderBook(m);
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#toggleRead').onclick = () => setRead(b.read_at ? '' : todayISO());
+  if ($('#readAt')) $('#readAt').onchange = (e) => { if (e.target.value) setRead(e.target.value); };
   $('#takePhoto').onclick = () => filePicker(sendPhoto);
   $('#uploadPhoto').onclick = () => filePicker(sendPhoto, { capture: false });
   $('#del').onclick = async () => {
@@ -369,11 +398,8 @@ function bookForm(b) {
         <option value="">—</option>${CONFIG.formats.map((x) => `<option ${x === b.format ? 'selected' : ''}>${esc(x)}</option>`).join('')}
       </select></div>
     </div>
-    <div class="grid2">
-      ${f('location', 'Location / shelf', 'list="locs" placeholder="Living room, top shelf"')}
-      <div class="field"><label for="f_copies">Copies</label>
-        <input type="number" id="f_copies" name="copies" min="1" value="${esc(b.copies || 1)}" inputmode="numeric"></div>
-    </div>
+    <div class="field"><label for="f_copies">Copies</label>
+      <input type="number" id="f_copies" name="copies" min="1" value="${esc(b.copies || 1)}" inputmode="numeric"></div>
     <div class="field"><label for="f_tags">Tags</label>
       <input type="text" id="f_tags" name="tags" value="${esc((b.tags || []).join(', '))}" placeholder="fantasy, to-read, gift">
       <div class="hint" id="tagSuggest">${CONFIG.tags.slice(0, 12).map((t) => `<button type="button" class="chip" data-tag="${esc(t)}" style="border:0;cursor:pointer">+ ${esc(t)}</button>`).join('')}</div>
@@ -387,7 +413,6 @@ function bookForm(b) {
     </div>
     <div class="field"><label for="f_notes">Notes</label><textarea id="f_notes" name="notes">${esc(b.notes)}</textarea></div>
     <div class="field"><label for="f_description">Description</label><textarea id="f_description" name="description">${esc(b.description)}</textarea></div>
-    ${datalist('locs', CONFIG.locations)}
     <div class="sticky-actions"><button class="btn primary block big" type="submit">Save book</button></div>
   </form>`;
 }
@@ -757,15 +782,11 @@ function showScanResult(result, data, resume, target) {
   if (!exact.length) {
     const form = data.found
       ? `<div class="card form" style="margin-bottom:12px">
-          <div class="grid2">
-            <div class="field"><label for="s_owner">Owner</label><select id="s_owner">${ownerOptions(store('lastOwner') || '')}</select></div>
-            <div class="field"><label for="s_loc">Location</label><input type="text" id="s_loc" list="locs" value="${esc(store('lastLocation') || '')}"></div>
-          </div>
+          <div class="field"><label for="s_owner">Owner</label><select id="s_owner">${ownerOptions(store('lastOwner') || '')}</select></div>
           <div class="field"><label for="s_edition">Special edition details</label>
             <input type="text" id="s_edition" placeholder="e.g. signed, Folio Society, sprayed edges"></div>
           <div class="field" style="margin:0"><label for="s_tags">Tags</label>
             <input type="text" id="s_tags" value="${esc(((b.categories || [])[0] || '').toLowerCase())}" placeholder="fantasy, gift"></div>
-          ${datalist('locs', CONFIG.locations)}
         </div>
         <button class="btn ${candidates.length ? '' : 'primary'} block big" id="addScanned">Add as a new book</button>`
       : `<button class="btn primary block" id="manual">Enter details by hand</button>`;
@@ -794,13 +815,11 @@ function showScanResult(result, data, resume, target) {
     const btn = $('#addScanned');
     btn.disabled = true;
     const owner = $('#s_owner').value;
-    const loc = $('#s_loc').value.trim();
     if (owner) store('lastOwner', owner);
-    store('lastLocation', loc);
     const { categories, source, ...book } = b;
     try {
       const saved = await api('/api/books', { json: {
-        ...book, owner, location: loc, edition: $('#s_edition').value.trim(),
+        ...book, owner, edition: $('#s_edition').value.trim(),
         tags: $('#s_tags').value.split(',').map((t) => t.trim()).filter(Boolean),
       } });
       toast(`Added “${saved.title}”`);
